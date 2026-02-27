@@ -1,154 +1,163 @@
 # PokéPrice FR
 
-## Objectif du projet
+## Objectif
 
-PokéPrice FR est une plateforme de référence permettant de répondre à une question simple :
+PokéPrice FR est une plateforme permettant d’estimer le prix de vente d’une carte Pokémon française à partir de ventes réellement conclues.
 
-> À combien puis-je vendre ma carte Pokémon ?
+Le système repose sur un principe fondamental :
 
-Le projet vise à fournir un prix fiable basé uniquement sur des ventes réelles, avec une expérience utilisateur simple, intuitive et minimaliste.
-
-Philosophie centrale :
-
-Fiabilité > Spéculation  
-Données réelles > Annonces actives  
+Un prix fiable doit être basé sur des transactions effectives, et non sur des annonces actives.
 
 ---
 
-# Vision du projet
+# Périmètre du projet
 
-## MVP (Phase 1)
+## MVP
 
 - Cartes Pokémon FR uniquement
 - Séries des 4 à 5 dernières années
 - Une seule entrée par numéro de carte
-- Segments :
+- Segmentation indépendante des prix :
   - RAW
-  - PSA
-  - PCA
-- Calcul basé sur ventes complétées
-- Score de confiance
-- Courbe d’évolution
+  - PSA (grade par grade)
+  - PCA (grade par grade)
+- Fenêtre principale de calcul : 30 jours
 - Affichage des X dernières ventes
+- Courbe d’évolution
+- Score de confiance (0 à 100)
 
-## Vision long terme
+## Évolutions prévues
 
-- Toutes les séries FR
-- Distinction holo / reverse / variantes
-- Plus de sociétés de gradation
-- Comparaison sold price vs listing price
-- Dashboard collection utilisateur
+- Extension à toutes les séries FR
+- Gestion des variantes (holo, reverse)
+- Ajout d’autres sociétés de gradation
+- Comparaison prix vendus vs annonces actives
+- Comptes utilisateurs et gestion de collection
 - Alertes de prix
 - API publique
-- Analyse statistique globale (évolution Pikachu, rareté, etc.)
+- Statistiques globales du marché (par Pokémon, rareté, set)
 
 ---
 
-# Sources de données & APIs
+# Sources de données
 
-## Catalogue des cartes
+## Catalogue
 
 ### TCGdex API
+
 Utilisée pour importer :
-- Séries FR
+- Séries françaises
 - Cartes
 - Numéros
 - Raretés
 - Images
 
-TCGdex fournit une API REST et GraphQL multilingue incluant le français.
-
-Rôle dans le projet :
-- Remplir la base `sets`
-- Remplir la base `cards`
-- Mise à jour automatique lors des nouvelles sorties
+Elle alimente les tables `sets` et `cards` et permet la mise à jour automatique lors des nouvelles sorties.
 
 ---
 
-## Prix & Ventes
+## Prix (ventes réalisées)
 
-### Objectif : ventes réelles uniquement
+### eBay (ventes complétées)
 
-### Sources envisagées :
+Extraction :
+- Prix
+- Date
+- Titre
+- Lien
+- Devise
+- Frais de port
 
-#### 1 eBay (ventes complétées)
-- Récupération des ventes "sold"
-- Extraction :
-  - Prix
-  - Date
-  - Titre
-  - Lien
-  - Devise
-- Normalisation en EUR
+Les données sont ensuite normalisées avant traitement.
 
- Note :
-Les APIs officielles eBay ont des limitations concernant les sold data.
-Selon la configuration, une solution tierce ou alternative peut être nécessaire.
+### Cardmarket (référence secondaire)
 
----
-
-#### 2 Cardmarket (benchmark agrégé)
-
-- Utilisation possible du Price Guide (trend / average)
-- Sert de référence secondaire
-- Ne remplace pas les ventes unitaires
+Le Price Guide peut servir d’indicateur complémentaire.  
+Les ventes unitaires restent la source principale du calcul.
 
 ---
 
-## Philosophie de fiabilité
+# Architecture
 
-Les annonces actives ne sont PAS utilisées pour le prix de référence.
-Elles peuvent être affichées séparément dans le futur comme indicateur de marché.
+Le projet est structuré en quatre services Docker :
+
+- frontend : interface utilisateur
+- api : lecture des données
+- worker : traitement et calcul des prix
+- db : PostgreSQL
+
+Principe central :
+
+L’API ne calcule pas les prix en temps réel.  
+Tous les calculs sont effectués en amont par le Worker.
 
 ---
 
-# Architecture générale
+# Pipeline de traitement (Worker)
 
-Le système est divisé en 6 modules :
+## 1. Import du catalogue
 
-## 1 Import Catalogue
-- Récupération via TCGdex
-- Mise à jour planifiée
+Synchronisation avec TCGdex pour importer les sets et les cartes.
 
-## 2 Collecteur de ventes
-- Job planifié (cron)
-- Récupération nouvelles ventes
-- Stockage brut dans `sale_records`
+## 2. Collecte des ventes
 
-## 3 Normalisation
-- Conversion devise
-- Calcul prix total (objet + frais)
-- Détection grade PSA/PCA
-- Nettoyage titre
-- Exclusion lots
+Récupération planifiée des ventes complétées.
 
-## 4 Matching automatique
-Association vente → carte
+## 3. Normalisation
 
-Méthodes :
-- Détection numéro carte
-- Détection série
-- Fuzzy matching nom
-- Détection PSA/PCA + grade
+- Conversion des devises en EUR
+- Calcul du prix total :
+  price_total = price_item + price_shipping
+- Extraction des informations de grade (PSA, PCA, etc.)
+- Détection des cartes non gradées (RAW)
+- Nettoyage des titres
+- Exclusion des lots
 
-Chaque vente reçoit un :
-`match_confidence ∈ [0 ; 1]`
+Chaque vente est assignée à un segment :
 
-## 5 Filtrage statistique
-- Méthode IQR
-- Exclusion anomalies
+- RAW
+- PSA_X
+- PCA_X
 
-## 6 Moteur de calcul
+## 4. Matching
+
+Association automatique d’une vente à une carte via :
+
+- Détection du numéro
+- Détection de la série
+- Similarité du nom (fuzzy matching)
+- Détection du grade
+
+Chaque vente reçoit un score :
+
+match_confidence ∈ [0 ; 1]
+
+## 5. Filtrage statistique
+
+Suppression des ventes aberrantes via la méthode IQR :
+
+IQR = P75 - P25  
+Bornes = [P25 - 1.5 × IQR ; P75 + 1.5 × IQR]
+
+Les ventes en dehors de cet intervalle sont exclues des calculs.
+
+## 6. Agrégation
+
+Pour chaque segment (RAW, PSA_9, PSA_10, etc.) :
+
 - Médiane
 - Moyenne
 - P25 / P75
-- Score de confiance
+- Confidence score
+
+Les segments sont totalement indépendants.
 
 ---
 
 # Modèle de base de données
 
 ## sets
+
 - id
 - name
 - code
@@ -156,6 +165,7 @@ Chaque vente reçoit un :
 - language
 
 ## cards
+
 - id
 - set_id
 - number
@@ -164,16 +174,17 @@ Chaque vente reçoit un :
 - image_url
 
 ## grading_companies
+
 - id
-- name (PSA, PCA)
+- name
 
 ## sale_records
+
 - id
 - card_id
 - source
 - source_sale_id
 - sold_at
-- title
 - url
 - currency
 - price_item
@@ -185,8 +196,9 @@ Chaque vente reçoit un :
 - match_confidence
 
 ## card_price_aggregates
+
 - card_id
-- segment (RAW, PSA_10, PCA_9...)
+- segment
 - window_days
 - sales_count
 - median_price
@@ -198,73 +210,48 @@ Chaque vente reçoit un :
 
 ---
 
-# Moteur de calcul des prix
+# Calcul du prix
 
-## 1 Filtrage
+## Prix principal
 
-Exclusion automatique des mots-clés :
-- lot
-- bundle
-- collection
-- x10
+Médiane sur 30 jours pour un segment donné.
 
-Suppression des outliers via IQR :
+## Prix secondaire
 
-dispersion = (P75 - P25) / median
+Moyenne sur la même période.
 
----
-
-## 2 Prix de référence
-
-Sur 30 jours :
-
-Prix principal = Médiane  
-Prix secondaire = Moyenne  
+Les segments sont calculés séparément :
+RAW ≠ PSA 9 ≠ PSA 10 ≠ PCA 9
 
 ---
 
 # Score de confiance (0 à 100)
 
-Le score indique la fiabilité du prix affiché.
+Indique la robustesse du prix affiché.
 
-## 1 Volume (0-40)
+Composé de quatre critères :
+
+## Volume (0–40)
+
 Basé sur le nombre de ventes :
 
-volume_score = min(40, (sales_count / 10) * 40)
+volume_score = min(40, (sales_count / 10) × 40)
 
-10 ventes = score max
+## Récence (0–20)
 
----
+Basée sur la date de la vente la plus récente.
 
-## 2 Récence (0-20)
+## Stabilité (0–25)
 
-Basé sur la vente la plus récente :
+Basée sur la dispersion relative :
 
-< 3 jours → 20  
-< 7 jours → 15  
-< 14 jours → 10  
-< 30 jours → 5  
-> 30 jours → 0  
+dispersion = (P75 - P25) / median
 
----
+Moins la dispersion est élevée, plus le marché est stable.
 
-## 3 Stabilité (0-25)
+## Matching (0–15)
 
-Basé sur la dispersion :
-
-< 10% → 25  
-< 20% → 20  
-< 40% → 15  
-< 60% → 8  
-> 60% → 0  
-
----
-
-## 4 Matching (0-15)
-
-matching_score = moyenne(match_confidence) * 15
-
----
+matching_score = moyenne(match_confidence) × 15
 
 ## Formule finale
 
@@ -278,77 +265,56 @@ Score plafonné à 100.
 
 ---
 
-# Courbe d’évolution
+# Visualisation
 
-Deux modes :
+Deux niveaux d’affichage :
 
 - Points individuels (chaque vente)
 - Médiane glissante
 
-Permet de visualiser :
+Permet d’analyser :
 - Tendance
 - Pics
-- Stabilité du marché
+- Volatilité
 
 ---
 
 # Système utilisateur (Phase 2)
 
 - Création de compte
-- Ajout cartes possédées
-- Sélection grade
-- Dashboard portefeuille
+- Ajout de cartes possédées
+- Sélection du grade
+- Suivi de portefeuille
 - Évolution automatique
-- Alertes prix
+- Alertes de prix
 
 ---
 
-#  Roadmap
+# Environnement local
 
-## MVP
-- Import séries récentes
-- Collecteur ventes
-- Matching automatique
-- Calcul prix + confiance
-- Pages : Accueil → Série → Carte
+Docker Compose :
 
-## V1
-- Optimisation performance
-- Historique long
-- Amélioration matching
-- Ajout nouvelles sources
-
-## V2
-- Comptes utilisateurs
-- Dashboard collection
-- Watchlist
-- Alertes
-
-## V3
-- Toutes les séries FR
-- Variantes holo/reverse
-- Comparaison listing vs sold
-- API publique
-- Analyse statistique globale
+- frontend : localhost:3000
+- api : localhost:4000
+- db : localhost:5432
+- worker : tâches planifiées
 
 ---
 
-#  Potentiel futur
+# Évolutions possibles
 
-- Analyse évolution par pokemon toutes séries confondues
-- Évolution par rareté
-- Indice global marché Pokémon FR
-- Indicateur volatilité
+- Extension à toutes les séries FR
+- Distinction des variantes
+- Ajout de nouvelles sociétés de gradation
+- Indices globaux du marché Pokémon FR
+- Heatmap de performance des sets
+- Indicateur de volatilité
+- Mise en place d’une queue (Redis / BullMQ) pour scalabilité
 
 ---
-
 
 # Conclusion
 
-PokéPrice FR est conçu pour devenir une référence fiable du marché Pokémon FR en combinant :
+PokéPrice FR est conçu comme un système statistique automatisé, transparent et évolutif permettant de produire un prix de référence fiable basé exclusivement sur des données réelles.
 
-- Ventes réelles
-- Transparence
-- Statistiques robustes
-- Expérience utilisateur claire
-- Vision long terme ambitieuse
+Architecture modulaire, traitement robuste et vision long terme structurée.
